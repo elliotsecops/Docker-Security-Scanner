@@ -1,3 +1,116 @@
+### Escáner de Seguridad de Docker
+
+#### Descripción General
+
+Este proyecto es un escáner de seguridad de Docker minimalista pero potente implementado en Go. El escáner verifica los contenedores en ejecución en busca de problemas de seguridad comunes, como ejecutarse como root, puertos expuestos y actualizaciones de seguridad faltantes. El script utiliza el SDK de Docker para Go para interactuar con Docker.
+
+#### Características
+
+- **Verificación de Ejecución como Root:** Identifica contenedores que se ejecutan como el usuario root.
+- **Verificación de Puertos Expuestos:** Detecta puertos expuestos en contenedores en ejecución.
+- **Actualizaciones de Seguridad Faltantes (Simplificado):** Una verificación simplificada de actualizaciones de seguridad faltantes.
+
+#### Requisitos Previos
+
+- **Go (Golang):** Asegúrate de tener Go instalado en tu sistema. Puedes descargarlo desde [golang.org](https://golang.org/dl/).
+- **Docker:** Asegúrate de tener Docker instalado y en ejecución en tu sistema. Puedes descargarlo desde [docker.com](https://www.docker.com/products/docker-desktop).
+
+#### Estructura del Proyecto
+
+```
+docker-security-scanner/
+├── Dockerfile
+├── README.md
+├── .gitignore
+└── main.go
+```
+
+#### Instrucciones de Configuración
+
+1. **Clonar el Repositorio:**
+   ```bash
+   git clone https://github.com/elliotsecops/docker-security-scanner.git
+   cd docker-security-scanner
+   ```
+
+2. **Construir el Escáner de Seguridad de Docker:**
+   ```bash
+   go build -o docker-security-scanner
+   ```
+
+#### Instrucciones de Uso
+
+##### Ejecutar el Escáner de Seguridad de Docker
+
+1. **Asegúrate de que Docker esté en Ejecución:**
+   - Asegúrate de que Docker esté en ejecución en tu sistema. Puedes verificarlo ejecutando:
+     ```bash
+     docker ps
+     ```
+
+2. **Ejecutar el Escáner de Seguridad de Docker:**
+   ```bash
+   ./docker-security-scanner
+   ```
+
+##### Ejemplo de Salida
+
+Cuando ejecutes el escáner, mostrará los resultados de las verificaciones de seguridad para cada contenedor en ejecución. Aquí tienes un ejemplo de cómo podría verse la salida:
+
+```
+Listando contenedores...
+Conectando al socket Unix...
+Encontrados 1 contenedores
+Inspeccionando contenedor <container_id>...
+El contenedor <container_id> se está ejecutando como root
+El contenedor <container_id> tiene el puerto expuesto: 80/tcp -> 8080
+```
+
+#### Verificaciones de Seguridad Realizadas
+
+##### Ejecución como Root
+
+El escáner verifica si un contenedor se está ejecutando como el usuario root inspeccionando la sección `Config` de la respuesta JSON del contenedor. Si el contenedor se está ejecutando como root, mostrará:
+
+```
+El contenedor <container_id> se está ejecutando como root
+```
+
+##### Puertos Expuestos
+
+El escáner verifica los puertos expuestos examinando la sección `HostConfig` de la respuesta JSON del contenedor. Si el contenedor tiene puertos expuestos, mostrará:
+
+```
+El contenedor <container_id> tiene el puerto expuesto: <port> -> <host_port>
+```
+
+##### Actualizaciones de Seguridad Faltantes (Simplificado)
+
+Esta verificación es más compleja y generalmente implica inspeccionar el sistema de archivos del contenedor o usar herramientas de gestión de paquetes para verificar paquetes desactualizados. La implementación actual es simplificada y no realiza una verificación detallada.
+
+#### Personalizar el Escáner
+
+Puedes personalizar el escáner para incluir más verificaciones de seguridad o modificar las existentes. Aquí tienes algunas ideas:
+
+1. **Verificación de Archivos Sensibles:**
+   - Añade una verificación para inspeccionar el sistema de archivos del contenedor en busca de archivos sensibles (por ejemplo, `.env`, `config.json`).
+
+2. **Verificación de Contraseñas Débiles:**
+   - Añade una verificación para inspeccionar las cuentas de usuario del contenedor en busca de contraseñas débiles.
+
+3. **Verificación de Servicios Innecesarios:**
+   - Añade una verificación para inspeccionar los servicios en ejecución del contenedor en busca de servicios innecesarios o inseguros (por ejemplo, SSH).
+
+#### Contribuir
+
+¡Las contribuciones son bienvenidas! Si tienes ideas para nuevas verificaciones de seguridad o mejoras a las existentes, no dudes en enviar un pull request!
+
+#### Licencia
+
+Este proyecto está licenciado bajo la Licencia MIT. Consulta el archivo [LICENSE](LICENSE) para más detalles.
+
+---
+
 ### Docker Security Scanner
 
 #### Overview
