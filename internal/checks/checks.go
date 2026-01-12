@@ -5,49 +5,14 @@ import (
 	"fmt"
 	"strings"
 	"time"
+
+	"github.com/docker/docker/api/types"
+	"github.com/docker/docker/api/types/container"
 )
 
 type DockerClient interface {
-	ListContainers(ctx context.Context, all bool) ([]*DockerContainer, error)
-	InspectContainer(ctx context.Context, containerID string) (*DockerContainerDetails, error)
-}
-
-type DockerContainer struct {
-	ID     string            `json:"Id"`
-	Names  []string          `json:"Names"`
-	Image  string            `json:"Image"`
-	State  string            `json:"State"`
-	Status string            `json:"Status"`
-	Labels map[string]string `json:"Labels"`
-}
-
-type DockerContainerDetails struct {
-	ID           string                 `json:"Id"`
-	Config       *ContainerConfig       `json:"Config"`
-	HostConfig   *HostConfig            `json:"HostConfig"`
-	ExposedPorts map[string]interface{} `json:"ExposedPorts"`
-}
-
-type ContainerConfig struct {
-	User string   `json:"User"`
-	Env  []string `json:"Env"`
-}
-
-type HostConfig struct {
-	NetworkMode  string                   `json:"NetworkMode"`
-	Privileged   bool                     `json:"Privileged"`
-	PortBindings map[string][]PortBinding `json:"PortBindings"`
-	Memory       int64                    `json:"Memory"`
-	CPUShares    int64                    `json:"CpuShares"`
-	NanoCpus     int64                    `json:"NanoCpus"`
-	PidsLimit    *int64                   `json:"PidsLimit"`
-	CapAdd       []string                 `json:"CapAdd,omitempty"`
-	CapDrop      []string                 `json:"CapDrop,omitempty"`
-}
-
-type PortBinding struct {
-	HostIP   string `json:"HostIp"`
-	HostPort string `json:"HostPort"`
+	ContainerList(ctx context.Context, options types.ContainerListOptions) ([]types.Container, error)
+	ContainerInspect(ctx context.Context, containerID string) (types.ContainerJSON, error)
 }
 
 type Severity string
@@ -74,7 +39,7 @@ const (
 type SecurityCheck interface {
 	Name() string
 	Description() string
-	Execute(ctx context.Context, container *DockerContainer, dockerClient DockerClient) (*SecurityCheckResult, error)
+	Execute(ctx context.Context, container *types.Container, dockerClient DockerClient) (*SecurityCheckResult, error)
 	Severity() Severity
 	Category() string
 }
@@ -101,8 +66,8 @@ func (c *RootUserCheck) Description() string {
 	return "Check if container is running as root user"
 }
 
-func (c *RootUserCheck) Execute(ctx context.Context, container *DockerContainer, dockerClient DockerClient) (*SecurityCheckResult, error) {
-	details, err := dockerClient.InspectContainer(ctx, container.ID)
+func (c *RootUserCheck) Execute(ctx context.Context, targetContainer *types.Container, dockerClient DockerClient) (*SecurityCheckResult, error) {
+	details, err := dockerClient.ContainerInspect(ctx, targetContainer.ID)
 	if err != nil {
 		return nil, err
 	}
@@ -110,16 +75,17 @@ func (c *RootUserCheck) Execute(ctx context.Context, container *DockerContainer,
 	result := &SecurityCheckResult{
 		CheckName:   c.Name(),
 		Description: c.Description(),
-		ContainerID: container.ID,
+		ContainerID: targetContainer.ID,
 		Severity:    SeverityHigh,
 		Category:    string(CategoryConfiguration),
 		Timestamp:   time.Now(),
 		Details:     make(map[string]interface{}),
 	}
 
-	if details.Config.User == "" || details.Config.User == "root" || details.Config.User == "0" {
+	user := details.Config.User
+	if user == "" || user == "root" || user == "0" {
 		result.Passed = false
-		result.Details["user"] = details.Config.User
+		result.Details["user"] = user
 		result.Details["reason"] = "Container running as root user"
 		result.Recommendations = []string{
 			"Run containers as non-root users using USER directive in Dockerfile",
@@ -128,7 +94,7 @@ func (c *RootUserCheck) Execute(ctx context.Context, container *DockerContainer,
 		}
 	} else {
 		result.Passed = true
-		result.Details["user"] = details.Config.User
+		result.Details["user"] = user
 	}
 
 	return result, nil
@@ -152,8 +118,8 @@ func (c *ExposedPortsCheck) Description() string {
 	return "Check for exposed ports and port bindings"
 }
 
-func (c *ExposedPortsCheck) Execute(ctx context.Context, container *DockerContainer, dockerClient DockerClient) (*SecurityCheckResult, error) {
-	details, err := dockerClient.InspectContainer(ctx, container.ID)
+func (c *ExposedPortsCheck) Execute(ctx context.Context, targetContainer *types.Container, dockerClient DockerClient) (*SecurityCheckResult, error) {
+	details, err := dockerClient.ContainerInspect(ctx, targetContainer.ID)
 	if err != nil {
 		return nil, err
 	}
@@ -161,7 +127,7 @@ func (c *ExposedPortsCheck) Execute(ctx context.Context, container *DockerContai
 	result := &SecurityCheckResult{
 		CheckName:   c.Name(),
 		Description: c.Description(),
-		ContainerID: container.ID,
+		ContainerID: targetContainer.ID,
 		Severity:    SeverityMedium,
 		Category:    string(CategoryNetwork),
 		Timestamp:   time.Now(),
@@ -171,14 +137,16 @@ func (c *ExposedPortsCheck) Execute(ctx context.Context, container *DockerContai
 	exposedPorts := make([]string, 0)
 	boundPorts := make([]string, 0)
 
-	for port := range details.ExposedPorts {
-		exposedPorts = append(exposedPorts, port)
+	for port := range details.Config.ExposedPorts {
+		exposedPorts = append(exposedPorts, string(port))
 	}
 
-	for port, bindings := range details.HostConfig.PortBindings {
-		for _, binding := range bindings {
-			boundPort := fmt.Sprintf("%s -> %s:%s", port, binding.HostIP, binding.HostPort)
-			boundPorts = append(boundPorts, boundPort)
+	if details.HostConfig != nil {
+		for port, bindings := range details.HostConfig.PortBindings {
+			for _, binding := range bindings {
+				boundPort := fmt.Sprintf("%s -> %s:%s", port, binding.HostIP, binding.HostPort)
+				boundPorts = append(boundPorts, boundPort)
+			}
 		}
 	}
 
@@ -223,18 +191,18 @@ func (c *VulnerabilityCheck) Description() string {
 	return "Check for known vulnerabilities in container images"
 }
 
-func (c *VulnerabilityCheck) Execute(ctx context.Context, container *DockerContainer, dockerClient DockerClient) (*SecurityCheckResult, error) {
+func (c *VulnerabilityCheck) Execute(ctx context.Context, targetContainer *types.Container, dockerClient DockerClient) (*SecurityCheckResult, error) {
 	result := &SecurityCheckResult{
 		CheckName:   c.Name(),
 		Description: c.Description(),
-		ContainerID: container.ID,
+		ContainerID: targetContainer.ID,
 		Severity:    SeverityCritical,
 		Category:    string(CategoryImage),
 		Timestamp:   time.Now(),
 		Details:     make(map[string]interface{}),
 	}
 
-	imageName := container.Image
+	imageName := targetContainer.Image
 
 	vulnerablePatterns := []string{
 		"ubuntu:14.04", "ubuntu:16.04",
@@ -287,8 +255,8 @@ func (c *SecretsCheck) Description() string {
 	return "Check for potential secrets in environment variables"
 }
 
-func (c *SecretsCheck) Execute(ctx context.Context, container *DockerContainer, dockerClient DockerClient) (*SecurityCheckResult, error) {
-	details, err := dockerClient.InspectContainer(ctx, container.ID)
+func (c *SecretsCheck) Execute(ctx context.Context, targetContainer *types.Container, dockerClient DockerClient) (*SecurityCheckResult, error) {
+	details, err := dockerClient.ContainerInspect(ctx, targetContainer.ID)
 	if err != nil {
 		return nil, err
 	}
@@ -296,7 +264,7 @@ func (c *SecretsCheck) Execute(ctx context.Context, container *DockerContainer, 
 	result := &SecurityCheckResult{
 		CheckName:   c.Name(),
 		Description: c.Description(),
-		ContainerID: container.ID,
+		ContainerID: targetContainer.ID,
 		Severity:    SeverityCritical,
 		Category:    string(CategorySecrets),
 		Timestamp:   time.Now(),
@@ -362,8 +330,8 @@ func (c *NetworkPolicyCheck) Description() string {
 	return "Check for network security policies and configurations"
 }
 
-func (c *NetworkPolicyCheck) Execute(ctx context.Context, container *DockerContainer, dockerClient DockerClient) (*SecurityCheckResult, error) {
-	details, err := dockerClient.InspectContainer(ctx, container.ID)
+func (c *NetworkPolicyCheck) Execute(ctx context.Context, targetContainer *types.Container, dockerClient DockerClient) (*SecurityCheckResult, error) {
+	details, err := dockerClient.ContainerInspect(ctx, targetContainer.ID)
 	if err != nil {
 		return nil, err
 	}
@@ -371,15 +339,16 @@ func (c *NetworkPolicyCheck) Execute(ctx context.Context, container *DockerConta
 	result := &SecurityCheckResult{
 		CheckName:   c.Name(),
 		Description: c.Description(),
-		ContainerID: container.ID,
+		ContainerID: targetContainer.ID,
 		Severity:    SeverityMedium,
 		Category:    string(CategoryNetwork),
 		Timestamp:   time.Now(),
 		Details:     make(map[string]interface{}),
 	}
 
-	networkMode := details.HostConfig.NetworkMode
-	isHostNetwork := networkMode == "host"
+	// Default to bridge if HostConfig is nil or NetworkMode is empty, but HostConfig shouldn't be nil on Inspect
+	networkMode := string(details.HostConfig.NetworkMode)
+	isHostNetwork := details.HostConfig.NetworkMode.IsHost()
 	isPrivileged := details.HostConfig.Privileged
 
 	securityIssues := make([]string, 0)
@@ -431,8 +400,8 @@ func (c *ResourceLimitsCheck) Description() string {
 	return "Check for resource limits and constraints"
 }
 
-func (c *ResourceLimitsCheck) Execute(ctx context.Context, container *DockerContainer, dockerClient DockerClient) (*SecurityCheckResult, error) {
-	details, err := dockerClient.InspectContainer(ctx, container.ID)
+func (c *ResourceLimitsCheck) Execute(ctx context.Context, targetContainer *types.Container, dockerClient DockerClient) (*SecurityCheckResult, error) {
+	details, err := dockerClient.ContainerInspect(ctx, targetContainer.ID)
 	if err != nil {
 		return nil, err
 	}
@@ -440,7 +409,7 @@ func (c *ResourceLimitsCheck) Execute(ctx context.Context, container *DockerCont
 	result := &SecurityCheckResult{
 		CheckName:   c.Name(),
 		Description: c.Description(),
-		ContainerID: container.ID,
+		ContainerID: targetContainer.ID,
 		Severity:    SeverityLow,
 		Category:    string(CategoryResources),
 		Timestamp:   time.Now(),
@@ -448,9 +417,12 @@ func (c *ResourceLimitsCheck) Execute(ctx context.Context, container *DockerCont
 	}
 
 	hostConfig := details.HostConfig
+	if hostConfig == nil {
+		hostConfig = &container.HostConfig{}
+	}
 
 	hasMemoryLimit := hostConfig.Memory > 0
-	hasCPULimit := hostConfig.CPUShares > 0 || hostConfig.NanoCpus > 0
+	hasCPULimit := hostConfig.CPUShares > 0 || hostConfig.NanoCPUs > 0
 	hasPidsLimit := hostConfig.PidsLimit != nil && *hostConfig.PidsLimit > 0
 
 	missingLimits := make([]string, 0)
@@ -506,18 +478,18 @@ func (c *ImageIntegrityCheck) Description() string {
 	return "Check for image integrity and trust"
 }
 
-func (c *ImageIntegrityCheck) Execute(ctx context.Context, container *DockerContainer, dockerClient DockerClient) (*SecurityCheckResult, error) {
+func (c *ImageIntegrityCheck) Execute(ctx context.Context, targetContainer *types.Container, dockerClient DockerClient) (*SecurityCheckResult, error) {
 	result := &SecurityCheckResult{
 		CheckName:   c.Name(),
 		Description: c.Description(),
-		ContainerID: container.ID,
+		ContainerID: targetContainer.ID,
 		Severity:    SeverityMedium,
 		Category:    string(CategoryImage),
 		Timestamp:   time.Now(),
 		Details:     make(map[string]interface{}),
 	}
 
-	imageName := container.Image
+	imageName := targetContainer.Image
 
 	isOfficialImage := strings.HasPrefix(imageName, "library/") || !strings.Contains(imageName, "/")
 	isFromTrustedRegistry := strings.Contains(imageName, "docker.io") ||
@@ -574,25 +546,25 @@ func (c *ProcessMonitoringCheck) Description() string {
 	return "Monitor container processes for suspicious activity"
 }
 
-func (c *ProcessMonitoringCheck) Execute(ctx context.Context, container *DockerContainer, dockerClient DockerClient) (*SecurityCheckResult, error) {
+func (c *ProcessMonitoringCheck) Execute(ctx context.Context, targetContainer *types.Container, dockerClient DockerClient) (*SecurityCheckResult, error) {
 	result := &SecurityCheckResult{
 		CheckName:   c.Name(),
 		Description: c.Description(),
-		ContainerID: container.ID,
+		ContainerID: targetContainer.ID,
 		Severity:    SeverityHigh,
 		Category:    string(CategoryRuntime),
 		Timestamp:   time.Now(),
 		Details:     make(map[string]interface{}),
 	}
 
-	if container.State == "running" {
+	if targetContainer.State == "running" {
 		result.Passed = true
-		result.Details["container_state"] = container.State
+		result.Details["container_state"] = targetContainer.State
 		result.Details["process_monitoring"] = "active"
 		result.Details["suspicious_processes"] = []string{}
 	} else {
 		result.Passed = true
-		result.Details["container_state"] = container.State
+		result.Details["container_state"] = targetContainer.State
 		result.Details["process_monitoring"] = "inactive"
 	}
 

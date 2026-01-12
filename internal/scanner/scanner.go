@@ -4,15 +4,14 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"io"
-	"net"
-	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
 	"sync"
 	"time"
 
+	"github.com/docker/docker/api/types"
+	"github.com/docker/docker/client"
 	"github.com/elliotsecops/docker-security-scanner/internal/checks"
 	"github.com/elliotsecops/docker-security-scanner/internal/config"
 	"github.com/elliotsecops/docker-security-scanner/internal/errors"
@@ -21,15 +20,11 @@ import (
 )
 
 type DockerClient = checks.DockerClient
-type DockerContainer = checks.DockerContainer
-type DockerContainerDetails = checks.DockerContainerDetails
-type ContainerConfig = checks.ContainerConfig
-type HostConfig = checks.HostConfig
+type DockerContainer = types.Container
 type SecurityCheck = checks.SecurityCheck
 type SecurityCheckResult = checks.SecurityCheckResult
 type Severity = checks.Severity
 type Category = checks.Category
-type PortBinding = checks.PortBinding
 
 type Scanner struct {
 	config         *config.Config
@@ -80,78 +75,18 @@ type ScanSummary struct {
 	Recommendations        []string `json:"recommendations"`
 }
 
-func NewDockerClient(config config.DockerConfig) DockerClient {
-	return &dockerClientImpl{
-		socketPath: config.SocketPath,
-		client: &http.Client{
-			Timeout: 30 * time.Second,
-			Transport: &http.Transport{
-				DialContext: func(_ context.Context, _, _ string) (net.Conn, error) {
-					return net.Dial("unix", config.SocketPath)
-				},
-			},
-		},
-	}
-}
-
-type dockerClientImpl struct {
-	socketPath string
-	client     *http.Client
-}
-
-func (d *dockerClientImpl) ListContainers(ctx context.Context, all bool) ([]*DockerContainer, error) {
-	url := "http://docker/containers/json"
-	if all {
-		url += "?all=1"
+func NewDockerClient(cfg config.DockerConfig) (DockerClient, error) {
+	opts := []client.Opt{
+		client.WithHost(cfg.SocketPath),
+		client.WithAPIVersionNegotiation(),
 	}
 
-	resp, err := d.client.Get(url)
+	cli, err := client.NewClientWithOpts(opts...)
 	if err != nil {
-		return nil, errors.Wrap(err, errors.ErrorTypeNetwork, "failed to list containers")
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		return nil, errors.NewDocker(fmt.Sprintf("failed to list containers, status code: %d", resp.StatusCode))
+		return nil, errors.Wrap(err, errors.ErrorTypeDocker, "failed to create docker client")
 	}
 
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return nil, errors.Wrap(err, errors.ErrorTypeInternal, "failed to read response body")
-	}
-
-	var containers []*DockerContainer
-	if err := json.Unmarshal(body, &containers); err != nil {
-		return nil, errors.Wrap(err, errors.ErrorTypeInternal, "failed to unmarshal JSON")
-	}
-
-	return containers, nil
-}
-
-func (d *dockerClientImpl) InspectContainer(ctx context.Context, containerID string) (*DockerContainerDetails, error) {
-	url := fmt.Sprintf("http://docker/containers/%s/json", containerID)
-
-	resp, err := d.client.Get(url)
-	if err != nil {
-		return nil, errors.Wrap(err, errors.ErrorTypeNetwork, "failed to inspect container")
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		return nil, errors.NewDocker(fmt.Sprintf("failed to inspect container, status code: %d", resp.StatusCode))
-	}
-
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return nil, errors.Wrap(err, errors.ErrorTypeInternal, "failed to read response body")
-	}
-
-	var details DockerContainerDetails
-	if err := json.Unmarshal(body, &details); err != nil {
-		return nil, errors.Wrap(err, errors.ErrorTypeInternal, "failed to unmarshal JSON")
-	}
-
-	return &details, nil
+	return cli, nil
 }
 
 func NewScanner(cfg *config.Config, logger *logging.Logger) *Scanner {
@@ -159,12 +94,15 @@ func NewScanner(cfg *config.Config, logger *logging.Logger) *Scanner {
 }
 
 func NewScannerWithMetrics(cfg *config.Config, logger *logging.Logger, metricsCollector *metrics.Metrics) *Scanner {
-	dockerClient := NewDockerClient(cfg.Docker)
+	dockerClient, err := NewDockerClient(cfg.Docker)
+	if err != nil {
+		logger.WithError(err).Fatal("Failed to initialize Docker client")
+	}
 
 	scanner := &Scanner{
 		config:         cfg,
 		logger:         logger,
-		dockerClient:   dockerClient,
+	dockerClient:   dockerClient,
 		errorCollector: errors.NewErrorCollector(),
 		metrics:        metricsCollector,
 	}
@@ -253,13 +191,17 @@ func (s *Scanner) initializeChecks() {
 	s.logger.WithField("check_count", len(s.checks)).Info("Initialized security checks")
 }
 
-func (s *Scanner) getContainersToScan(ctx context.Context) ([]*DockerContainer, error) {
-	allContainers, err := s.dockerClient.ListContainers(ctx, s.config.Scanner.ScanStopped)
+func (s *Scanner) getContainersToScan(ctx context.Context) ([]DockerContainer, error) {
+	options := types.ContainerListOptions{
+		All: s.config.Scanner.ScanStopped,
+	}
+
+	allContainers, err := s.dockerClient.ContainerList(ctx, options)
 	if err != nil {
 		return nil, err
 	}
 
-	var filteredContainers []*DockerContainer
+	var filteredContainers []DockerContainer
 	for _, container := range allContainers {
 		if s.shouldScanContainer(container) {
 			filteredContainers = append(filteredContainers, container)
@@ -269,18 +211,18 @@ func (s *Scanner) getContainersToScan(ctx context.Context) ([]*DockerContainer, 
 	return filteredContainers, nil
 }
 
-func (s *Scanner) shouldScanContainer(container *DockerContainer) bool {
+func (s *Scanner) shouldScanContainer(c DockerContainer) bool {
 	for _, excludeImage := range s.config.Scanner.ExcludeImages {
-		if contains(container.Image, excludeImage) {
-			s.logger.WithField("container_id", container.ID).Debug("Skipping container - image excluded")
+		if contains(c.Image, excludeImage) {
+			s.logger.WithField("container_id", c.ID).Debug("Skipping container - image excluded")
 			return false
 		}
 	}
 
 	for _, excludeName := range s.config.Scanner.ExcludeNames {
-		for _, name := range container.Names {
+		for _, name := range c.Names {
 			if contains(name, excludeName) {
-				s.logger.WithField("container_id", container.ID).Debug("Skipping container - name excluded")
+				s.logger.WithField("container_id", c.ID).Debug("Skipping container - name excluded")
 				return false
 			}
 		}
@@ -289,7 +231,7 @@ func (s *Scanner) shouldScanContainer(container *DockerContainer) bool {
 	return true
 }
 
-func (s *Scanner) scanContainers(ctx context.Context, containers []*DockerContainer, scanID string) map[string]*ContainerResult {
+func (s *Scanner) scanContainers(ctx context.Context, containers []DockerContainer, scanID string) map[string]*ContainerResult {
 	results := make(map[string]*ContainerResult)
 	var mu sync.Mutex
 
@@ -300,20 +242,20 @@ func (s *Scanner) scanContainers(ctx context.Context, containers []*DockerContai
 
 	var wg sync.WaitGroup
 
-	for _, container := range containers {
+	for _, c := range containers {
 		wg.Add(1)
-		go func(container *DockerContainer) {
+		go func(container DockerContainer) {
 			defer wg.Done()
 
 			<-workerPool
 			defer func() { workerPool <- struct{}{} }()
 
-			containerResult := s.scanSingleContainer(ctx, container, scanID)
+			containerResult := s.scanSingleContainer(ctx, &container, scanID)
 
 			mu.Lock()
 			results[container.ID] = containerResult
 			mu.Unlock()
-		}(container)
+		}(c)
 	}
 
 	wg.Wait()
@@ -632,6 +574,35 @@ func contains(s, substr string) bool {
 	return len(s) >= len(substr) && (s == substr || (len(s) > len(substr) && s[:len(substr)+1] == substr+":"))
 }
 
-func (s *Scanner) updatePerformanceMetrics()                            {}
-func (s *Scanner) updateContainerMetrics(containers []*DockerContainer) {}
-func (s *Scanner) updateSecurityMetrics(scanResult *ScanResult)         {}
+func (s *Scanner) updatePerformanceMetrics() {}
+
+func (s *Scanner) updateContainerMetrics(containers []DockerContainer) {
+	total := len(containers)
+	running := 0
+	stopped := 0
+	
+	imageCounts := make(map[string]int)
+
+	for _, c := range containers {
+		if c.State == "running" {
+			running++
+		} else {
+			stopped++
+		}
+		imageCounts[c.Image]++
+	}
+
+	if s.metrics != nil {
+		s.metrics.UpdateContainerMetrics(total, running, stopped)
+		s.metrics.UpdateContainersByImage(imageCounts)
+	}
+}
+
+func (s *Scanner) updateSecurityMetrics(scanResult *ScanResult) {
+	if s.metrics == nil {
+		return
+	}
+	// This would need to count root users etc from results, but scanResult has aggregate counts
+	// We can update the simple metrics here
+	// The detailed metrics are updated during the scan in scanSingleContainer
+}
