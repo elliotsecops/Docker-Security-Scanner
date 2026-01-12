@@ -29,3 +29,8 @@ logging:
   level: "info"
   format: "text"
   output: "stdout"
+
+metrics:
+  enabled: true
+  port: ":9090"
+  path: "/metrics"

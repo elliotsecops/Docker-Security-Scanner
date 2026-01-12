@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"net/http"
 	"os"
 	"os/signal"
 	"syscall"
@@ -9,6 +10,7 @@ import (
 	"github.com/elliotsecops/docker-security-scanner/internal/config"
 	"github.com/elliotsecops/docker-security-scanner/internal/logging"
 	"github.com/elliotsecops/docker-security-scanner/internal/scanner"
+	"github.com/prometheus/client_golang/prometheus/promhttp"
 )
 
 func main() {
@@ -18,6 +20,17 @@ func main() {
 	cfg, err := config.LoadConfig()
 	if err != nil {
 		logger.WithError(err).Fatal("Failed to load configuration")
+	}
+
+	// Start metrics server
+	if cfg.Metrics.Enabled {
+		go func() {
+			http.Handle(cfg.Metrics.Path, promhttp.Handler())
+			logger.WithField("port", cfg.Metrics.Port).Info("Starting metrics server")
+			if err := http.ListenAndServe(cfg.Metrics.Port, nil); err != nil {
+				logger.WithError(err).Error("Metrics server failed")
+			}
+		}()
 	}
 
 	secScanner := scanner.NewScanner(cfg, logger)

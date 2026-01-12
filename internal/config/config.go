@@ -15,6 +15,14 @@ type Config struct {
 	SecurityChecks SecurityChecksConfig `mapstructure:"security_checks"`
 	Reporting      ReportingConfig      `mapstructure:"reporting"`
 	Logging        LoggingConfig        `mapstructure:"logging"`
+	Metrics        MetricsConfig        `mapstructure:"metrics"`
+}
+
+// MetricsConfig contains metrics settings
+type MetricsConfig struct {
+	Enabled bool   `mapstructure:"enabled"`
+	Port    string `mapstructure:"port"`
+	Path    string `mapstructure:"path"`
 }
 
 // ScannerConfig contains scanner-specific settings
@@ -130,6 +138,10 @@ func setDefaults(v *viper.Viper) {
 	v.SetDefault("logging.output", "stdout")
 	v.SetDefault("logging.enable_file", false)
 	v.SetDefault("logging.file_path", "/var/log/docker-security-scanner.log")
+
+	v.SetDefault("metrics.enabled", true)
+	v.SetDefault("metrics.port", ":9090")
+	v.SetDefault("metrics.path", "/metrics")
 }
 
 // validateConfig validates the configuration
@@ -153,6 +165,10 @@ func validateConfig(config *Config) error {
 		if err := os.MkdirAll(logDir, 0755); err != nil {
 			return fmt.Errorf("failed to create log directory: %w", err)
 		}
+	}
+
+	if config.Metrics.Enabled && config.Metrics.Port == "" {
+		return fmt.Errorf("metrics port is required when metrics are enabled")
 	}
 
 	return nil
