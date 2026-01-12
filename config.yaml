@@ -1,0 +1,31 @@
+scanner:
+  max_concurrent_scans: 10
+  timeout: "30m"
+  scan_stopped_containers: false
+  exclude_images: []
+  exclude_names: []
+
+docker:
+  socket_path: "/var/run/docker.sock"
+  api_version: "1.41"
+  tls_verify: false
+
+security_checks:
+  root_user_check: true
+  exposed_ports_check: true
+  vulnerability_check: true
+  secrets_check: true
+  network_policy_check: true
+  resource_limits_check: true
+  image_integrity_check: true
+  process_monitoring_check: true
+
+reporting:
+  output_dir: "./reports"
+  formats: ["json"]
+  include_details: true
+
+logging:
+  level: "info"
+  format: "text"
+  output: "stdout"
